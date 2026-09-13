@@ -962,9 +962,15 @@ public class LuceneIndex implements IndexProvider {
     private long executeCount(IndexSearcher searcher, Query query) throws IOException {
         final long time = System.currentTimeMillis();
         // We ignore offset and limit for totals
-        final TopDocs docs = searcher.search(query, 1);
-        log.debug("Executed query [{}] in {} ms", query, System.currentTimeMillis() - time);
-        return docs.totalHits.value;
+        // search(query, 1) only counts exactly up to IndexSearcher's early-termination threshold
+        // (1000 since Lucene 8); past it totalHits.value is a lower bound, flagged by
+        // totalHits.relation == GREATER_THAN_OR_EQUAL_TO. Reading .value alone silently
+        // under-reported every count above the threshold. IndexSearcher.count is the exact-count
+        // API: no scoring, no document materialisation. executeAvg divides by this, so mean()
+        // was skewed by the same amount.
+        final long total = searcher.count(query);
+        log.debug("Executed count query [{}] in {} ms", query, System.currentTimeMillis() - time);
+        return total;
     }
 
     private SortField.Type sortFieldType(Class fieldType) {
@@ -1029,9 +1035,12 @@ public class LuceneIndex implements IndexProvider {
 
             final long time = System.currentTimeMillis();
             // Lucene doesn't like limits of 0.  Also, it doesn't efficiently build a total list.
-            final TopDocs docs = searcher.search(q, 1);
-            log.debug("Executed query [{}] in {} ms", q, System.currentTimeMillis() - time);
-            return QueryUtil.applyOffsetWithQueryLimitAfterCount(docs.totalHits.value, query.getOffset(), query);
+            // Same defect as executeCount: search(q, 1) stops counting exactly past the
+            // early-termination threshold and reports a lower bound in totalHits.value, which
+            // this method returned as though it were a total. count() is the exact-count API.
+            final long total = searcher.count(q);
+            log.debug("Executed count query [{}] in {} ms", q, System.currentTimeMillis() - time);
+            return QueryUtil.applyOffsetWithQueryLimitAfterCount(total, query.getOffset(), query);
         } catch (final IOException e) {
             throw new TemporaryBackendException("Could not execute Lucene query", e);
         }
